@@ -1,0 +1,29 @@
+from openai import AzureOpenAI
+import os
+
+api_key = ''
+endpoint = ''
+deployment = 'gpt-4o'
+api_version='2024-12-01-preview'
+
+client = AzureOpenAI(
+    api_key = api_key,
+    azure_endpoint = endpoint,
+    api_version = api_version
+)
+
+# response = client.chat.completions.create(model=deployment, 
+#                                           messages=[{"role": "system", "content": "你是一個厲害的數學家。"},
+#                                                     {"role": "user", "content": "可以請你幫我介紹泰勒展開式嗎?"}]
+                                         # )
+history = [{'role': 'system', 'content': '你是一個厲害的數學家'}]
+
+history.append({"role": "user", "content": '可以請你幫我介紹泰勒展開式嗎?'})
+
+response1 = client.chat.completions.create(model=deployment, messages=history)
+
+print(response1.choices[0].message.content)
+
+history = [{'role': 'user', 'content': '你的意思是，在x=0時叫做馬克勞林展開式? 那可解析函數(analytic function)又是甚麼?'}]
+response2 = client.chat.completions.create(model=deployment, messages=history)
+print(response2.choices[0].message.content)
