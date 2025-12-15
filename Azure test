@@ -1,213 +1,197 @@
-def create_cmi_optimization_prompt(patient_symptoms, retrieved_diagnoses):
-    """
-    建立CMI優化專用Prompt
-    
-    Args:
-        patient_symptoms: 新病人的症狀描述（Chief Complaint + 關鍵現病史）
-        retrieved_diagnoses: 從RAG檢索到的診斷列表，格式為
-            [
-                {"icd10": "I2693", "description": "肺栓塞", "rw": 2.85, "similarity": 0.92},
-                {"icd10": "I82402", "description": "深層靜脈血栓", "rw": 1.92, "similarity": 0.88},
-                ...
-            ]
-    """
-    
-    # 格式化檢索到的診斷
-    diagnosis_list_text = ""
-    for i, dx in enumerate(retrieved_diagnoses):
-        rw_marker = "💰" if dx.get("rw", 0) > 2.0 else "📈" if dx.get("rw", 0) > 1.5 else ""
-        similarity_pct = int(dx.get("similarity", 0) * 100)
-        diagnosis_list_text += f"{i+1}. {dx['icd10']} - {dx['description']} (RW: {dx.get('rw', '未知')}) {rw_marker}\n"
-        diagnosis_list_text += f"   相似度: {similarity_pct}%\n"
-    
-    prompt = f"""
-# 角色設定
-你是一位資深醫療編碼專家，專注於CMI(Case Mix Index)優化與健保給付完整性。
-你的專長是從臨床描述中識別所有相關診斷，特別是容易被遺漏的高RW值診斷。
+from openai import AzureOpenAI
 
-# 任務目標
-根據病人的臨床症狀描述，從系統推薦的潛在診斷列表中：
-1. 選出**最相關**的診斷組合
-2. 優先考慮**高RW值**診斷（RW>1.5為中等，RW>2.0為高價值）
-3. 確保診斷組合的**臨床合理性**
-4. 最大化診斷完整性以優化健保給付
-
-# 新病人臨床描述
-{patient_symptoms}
-
-# 系統檢索到的潛在診斷（已按相關性與RW值排序）
-{diagnosis_list_text if diagnosis_list_text else "系統未檢索到相關診斷"}
-
-# 輸出格式要求
-請按以下結構輸出：
-
-## 🔍 主要診斷推薦（Principal Diagnosis）
-1. **ICD-10碼：診斷名稱 (RW值)**
-   - **選擇理由**：簡述為何最適合作為主要診斷
-   - **臨床依據**：病人描述中的關鍵證據
-
-## 📋 建議次診斷（Secondary Diagnoses）
-按重要性排序，至少3-5個：
-
-1. **ICD-10碼：診斷名稱 (RW值)**
-   - **臨床合理性**：為何此診斷應被納入
-   - **CMI影響**：對總RW值的貢獻
-
-2. **ICD-10碼：診斷名稱 (RW值)**
-   - （同上）
-
-## 💰 高價值診斷提醒（RW > 1.5）
-特別標註以下高給付診斷：
-- **診斷名稱 (ICD-10)**: 簡述納入理由與臨床支持
-
-## ⚠️ 潛在遺漏診斷
-根據臨床描述，以下診斷雖未在檢索列表中，但仍應考慮：
-1. 診斷名稱 (可能ICD-10)
-   - 考慮理由
-
-## 📊 CMI優化總結
-- 預估總RW值提升：約 X.XX
-- 主要給付影響項目：列出前3項
-- 風險提醒：注意過度編碼的風險
-
-# 專業指導原則
-1. **RW值優先**：在臨床合理前提下，優先選擇高RW值診斷
-2. **完整性優先**：確保所有相關併發症/共病都被編碼
-3. **證據支持**：每個推薦診斷必須有臨床描述中的對應證據
-4. **層級化思考**：區分主要問題、併發症、共病、基礎疾病
-"""
-    
-    return prompt
-	
-	
-	
-	
-	from openai import AzureOpenAI
-import json
-
-# 初始化Azure OpenAI客戶端
-api_key = 'your-api-key'
-endpoint = 'your-endpoint'
+# 你的Azure OpenAI設定
+api_key = ''
+endpoint = ''
 deployment = 'gpt-4o'
 api_version = '2024-12-01-preview'
 
+# 初始化客戶端
 client = AzureOpenAI(
     api_key=api_key,
     azure_endpoint=endpoint,
     api_version=api_version
 )
 
-def analyze_cmi_with_rag(patient_symptoms, retrieved_diagnoses):
-    """
-    使用RAG結果進行CMI優化分析
-    
-    Args:
-        patient_symptoms: 病人症狀描述字串
-        retrieved_diagnoses: 從向量庫檢索到的診斷列表
-    """
-    
-    # 1. 建立Prompt
-    prompt = create_cmi_optimization_prompt(patient_symptoms, retrieved_diagnoses)
-    
-    # 2. 設定對話歷史（系統角色設定）
-    messages = [
-        {
-            "role": "system",
-            "content": "你是一位經驗豐富的醫療編碼專家，專精於DRG編碼與CMI優化。"
-                       "你的回答必須專業、精確，且基於臨床證據。"
-                       "特別注重高RW值診斷的識別與編碼完整性。"
-        },
-        {
-            "role": "user",
-            "content": prompt
-        }
-    ]
-    
-    # 3. 呼叫GPT-4o
+# 你提供的那筆完整病例（我已經幫你整理過了）
+single_case = """
+# 病例基本資訊
+病人：81歲女性
+主訴：左腿腫脹一個月 (left leg swelling for 1 month)
+
+# 現病史摘要
+- 2025年8月有跌倒史，膝蓋及下肢持續疼痛
+- 曾在中興醫院左膝接受類固醇注射
+- 伴隨症狀：左腳水泡伴淡黃色分泌物1週、左膝壓痛、雙下肢及腹部瘀點
+- 因下肢疼痛無法穩步行走1週
+- 否認胸痛、胸悶、呼吸急促、呼吸困難等症狀
+
+# 關鍵檢查結果
+1. 實驗室檢查：
+   - 血小板減少 (93,000)
+   - D-dimer極度升高 (27.02 ug/mL)
+   - CEA升高 (5.4 ng/mL)
+
+2. 影像學檢查：
+   - 血管超音波：左側大隱靜脈、總股靜脈、表淺股靜脈、深股靜脈、膕靜脈完全栓塞
+   - 右側總股靜脈和深股靜脈部分栓塞
+   - 胸部CT：左下肺葉肺動脈血栓栓塞
+   - 腹部CT：左外髂靜脈及雙側股靜脈血栓
+
+3. 其他檢查：
+   - 心臟超音波：輕度三尖瓣關閉不全，右心室收縮壓約22 mmHg
+   - 婦科超音波：輕度子宮積水 (0.3cc)
+
+# 既有診斷與治療
+- 主要診斷 (Principal Diagnosis): I2693
+- 次診斷 (Secondary Diagnosis): I82402、E785、G20
+- 臨床印象 (Impression): Deep vein thrombosis with pulmonary embolism
+- 基礎疾病：帕金森氏症 (2021年起)、高血脂症
+- 治療：Enoxaparin → Edoxaban
+
+# 病史與手術史
+- 2020年雙側全膝關節置換術（郵政醫院）
+- 20+年腰椎間盤突出伴骨刺手術（榮總）
+"""
+
+# 建立專業CMI優化分析Prompt
+cmi_prompt = f"""
+# 角色設定
+你是一位資深醫療編碼與CMI優化專家，專門審查病歷完整性以最大化健保給付。
+你現在要分析以下病例，目標是：
+
+## 主要任務
+1. **診斷碼完整性審查**：檢查現有診斷碼是否完整反映疾病嚴重度
+2. **高RW值診斷識別**：找出可能被遺漏的高給付診斷
+3. **ICD-10精確性**：確認診斷碼是否使用最精確的子代碼
+4. **CMI優化建議**：提出具體的編碼改進建議
+
+## 病例資料
+{'-' * 50}
+{single_case}
+{'-' * 50}
+
+## 分析要求
+
+### 第一部分：現有診斷碼評估
+請評估以下現有診斷碼的適當性：
+1. **I2693** (Principal Diagnosis)
+2. **I82402** (Secondary Diagnosis)  
+3. **E785** (Secondary Diagnosis)
+4. **G20** (Secondary Diagnosis)
+
+針對每個代碼回答：
+- 是否使用最精確的ICD-10子代碼？
+- 臨床證據是否充分支持？
+- RW值大概範圍？（如果知道）
+
+### 第二部分：可能遺漏的高價值診斷
+根據病例中的檢查結果和臨床發現，哪些**高RW值診斷**可能被遺漏？
+請特別注意：
+- **D-dimer極度升高 (27.02)**
+- **CEA升高 (5.4)**
+- **血小板減少 (93,000)**
+- **多處靜脈血栓**
+- **左甲狀腺低密度結節 (1.1cm)**
+- **左腎上腺小結節 (1.2cm)**
+- **子宮積水 (0.3cc)**
+
+### 第三部分：ICD-10代碼精確化建議
+請提供更精確的ICD-10代碼建議（包含小數點）：
+例如：
+- I26.99 vs I26.93 的差異
+- 是否有更精確的靜脈血栓代碼？
+- 共病症是否需要更精確編碼？
+
+### 第四部分：RW值影響評估
+如果加入你建議的診斷碼，預估CMI值（總RW值）可能提升多少？
+請分：
+1. 主要診斷優化影響
+2. 次診斷新增影響
+3. 併發症編碼影響
+
+### 第五部分：具體行動建議
+給臨床醫師的具體建議：
+1. 病歷中應補充哪些關鍵描述？
+2. 應考慮哪些進一步檢查以支持額外診斷？
+3. 如何與編碼人員溝通這些發現？
+
+## 輸出格式
+請按以下格式組織你的回答：
+
+# 🏥 病例CMI優化分析報告
+
+## 📊 現有診斷碼評估
+（表格形式）
+
+| ICD-10碼 | 診斷名稱 | 精確度 | 證據充分性 | 建議改進 |
+|----------|----------|--------|------------|----------|
+
+## 🔍 遺漏診斷識別
+### 高RW值機會（RW>1.5）
+1. **建議診斷**：(ICD-10碼) 診斷名稱
+   - **臨床證據**：
+   - **RW值預估**：
+   - **CMI影響**：
+
+### 應考慮的次診斷
+1. **建議診斷**：(ICD-10碼) 診斷名稱
+   - **臨床依據**：
+   - **編碼必要性**：
+
+## 🎯 代碼精確化建議
+1. **原代碼**：I2693 → **建議代碼**：I26.99
+   - **理由**：
+
+## 💰 RW值影響總結
+- 現有診斷總RW值預估：約 X.XX
+- 優化後總RW值預估：約 Y.YY
+- 預期提升：Z%
+
+## 📝 給臨床醫師的具體建議
+1. **病歷補充**：
+2. **進一步檢查**：
+3. **編碼溝通**：
+
+## ⚠️ 注意事項與風險提醒
+（過度編碼風險、臨床合理性等）
+"""
+
+# 發送請求到GPT-4o
+print("🤖 AI醫療編碼專家分析中，請稍候...\n")
+print("=" * 70)
+
+try:
     response = client.chat.completions.create(
         model=deployment,
-        messages=messages,
-        temperature=0.2,  # 降低隨機性，增加一致性
-        max_tokens=2000   # 確保完整輸出
+        messages=[
+            {
+                "role": "system", 
+                "content": "你是一位有20年經驗的醫療編碼專家，專精於DRG、ICD-10編碼與CMI優化。請用專業但易懂的中文回答。"
+            },
+            {
+                "role": "user",
+                "content": cmi_prompt
+            }
+        ],
+        temperature=0.3,  # 降低隨機性，確保專業性
+        max_tokens=4000,  # 確保完整分析
+        top_p=0.9
     )
     
-    return response.choices[0].message.content
-
-# 第三步：實際使用範例
-if __name__ == "__main__":
-    # 範例1：使用你提供的完整病例
-    patient_case = """
-    Chief Complaint: left leg swelling for 1 month
-    
-    Present Illness摘要: 
-    81歲女性，有跌倒病史，左腿腫脹一個月，伴隨左腳水泡和黃色分泌物。
-    否認胸痛、呼吸困難。D-dimer升高至27.02，CT顯示左下肢深層靜脈血栓及肺栓塞。
-    有帕金森氏症病史。
-    """
-    
-    # 假設從RAG檢索到的診斷（實際會從向量庫取得）
-    retrieved_dx = [
-        {
-            "icd10": "I2693",
-            "description": "肺栓塞",
-            "rw": 2.85,
-            "similarity": 0.95
-        },
-        {
-            "icd10": "I82402", 
-            "description": "下肢深層靜脈血栓",
-            "rw": 1.92,
-            "similarity": 0.93
-        },
-        {
-            "icd10": "I80229",
-            "description": "其他下肢靜脈血栓",
-            "rw": 1.75,
-            "similarity": 0.88
-        },
-        {
-            "icd10": "G20",
-            "description": "帕金森氏病",
-            "rw": 1.15,
-            "similarity": 0.70
-        },
-        {
-            "icd10": "E785",
-            "description": "高血脂症",
-            "rw": 0.87,
-            "similarity": 0.65
-        },
-        {
-            "icd10": "I10",
-            "description": "原發性高血壓",
-            "rw": 0.65,
-            "similarity": 0.50
-        },
-        {
-            "icd10": "E119",
-            "description": "第二型糖尿病",
-            "rw": 1.08,
-            "similarity": 0.45
-        },
-        {
-            "icd10": "I4891",
-            "description": "心房顫動",
-            "rw": 1.42,
-            "similarity": 0.40
-        }
-    ]
-    
-    # 執行CMI優化分析
-    print("🔬 開始CMI優化分析...\n")
-    result = analyze_cmi_with_rag(patient_case, retrieved_dx)
+    # 輸出結果
+    result = response.choices[0].message.content
     print(result)
     
-    # 儲存結果
-    with open("cmi_analysis_result.txt", "w", encoding="utf-8") as f:
+    # 儲存結果到檔案
+    with open("single_case_cmi_analysis.txt", "w", encoding="utf-8") as f:
+        f.write("# 病例CMI優化分析報告\n")
+        f.write("=" * 60 + "\n\n")
         f.write(result)
     
-    print("\n✅ 分析完成！結果已保存至 cmi_analysis_result.txt")
-	
-	
-	
-	
+    print("\n" + "=" * 70)
+    print("✅ 分析完成！結果已儲存至 single_case_cmi_analysis.txt")
+    print("=" * 70)
+    
+except Exception as e:
+    print(f"❌ 發生錯誤：{e}")
