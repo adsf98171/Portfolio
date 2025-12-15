@@ -1,29 +1,213 @@
-from openai import AzureOpenAI
-import os
+def create_cmi_optimization_prompt(patient_symptoms, retrieved_diagnoses):
+    """
+    建立CMI優化專用Prompt
+    
+    Args:
+        patient_symptoms: 新病人的症狀描述（Chief Complaint + 關鍵現病史）
+        retrieved_diagnoses: 從RAG檢索到的診斷列表，格式為
+            [
+                {"icd10": "I2693", "description": "肺栓塞", "rw": 2.85, "similarity": 0.92},
+                {"icd10": "I82402", "description": "深層靜脈血栓", "rw": 1.92, "similarity": 0.88},
+                ...
+            ]
+    """
+    
+    # 格式化檢索到的診斷
+    diagnosis_list_text = ""
+    for i, dx in enumerate(retrieved_diagnoses):
+        rw_marker = "💰" if dx.get("rw", 0) > 2.0 else "📈" if dx.get("rw", 0) > 1.5 else ""
+        similarity_pct = int(dx.get("similarity", 0) * 100)
+        diagnosis_list_text += f"{i+1}. {dx['icd10']} - {dx['description']} (RW: {dx.get('rw', '未知')}) {rw_marker}\n"
+        diagnosis_list_text += f"   相似度: {similarity_pct}%\n"
+    
+    prompt = f"""
+# 角色設定
+你是一位資深醫療編碼專家，專注於CMI(Case Mix Index)優化與健保給付完整性。
+你的專長是從臨床描述中識別所有相關診斷，特別是容易被遺漏的高RW值診斷。
 
-api_key = ''
-endpoint = ''
+# 任務目標
+根據病人的臨床症狀描述，從系統推薦的潛在診斷列表中：
+1. 選出**最相關**的診斷組合
+2. 優先考慮**高RW值**診斷（RW>1.5為中等，RW>2.0為高價值）
+3. 確保診斷組合的**臨床合理性**
+4. 最大化診斷完整性以優化健保給付
+
+# 新病人臨床描述
+{patient_symptoms}
+
+# 系統檢索到的潛在診斷（已按相關性與RW值排序）
+{diagnosis_list_text if diagnosis_list_text else "系統未檢索到相關診斷"}
+
+# 輸出格式要求
+請按以下結構輸出：
+
+## 🔍 主要診斷推薦（Principal Diagnosis）
+1. **ICD-10碼：診斷名稱 (RW值)**
+   - **選擇理由**：簡述為何最適合作為主要診斷
+   - **臨床依據**：病人描述中的關鍵證據
+
+## 📋 建議次診斷（Secondary Diagnoses）
+按重要性排序，至少3-5個：
+
+1. **ICD-10碼：診斷名稱 (RW值)**
+   - **臨床合理性**：為何此診斷應被納入
+   - **CMI影響**：對總RW值的貢獻
+
+2. **ICD-10碼：診斷名稱 (RW值)**
+   - （同上）
+
+## 💰 高價值診斷提醒（RW > 1.5）
+特別標註以下高給付診斷：
+- **診斷名稱 (ICD-10)**: 簡述納入理由與臨床支持
+
+## ⚠️ 潛在遺漏診斷
+根據臨床描述，以下診斷雖未在檢索列表中，但仍應考慮：
+1. 診斷名稱 (可能ICD-10)
+   - 考慮理由
+
+## 📊 CMI優化總結
+- 預估總RW值提升：約 X.XX
+- 主要給付影響項目：列出前3項
+- 風險提醒：注意過度編碼的風險
+
+# 專業指導原則
+1. **RW值優先**：在臨床合理前提下，優先選擇高RW值診斷
+2. **完整性優先**：確保所有相關併發症/共病都被編碼
+3. **證據支持**：每個推薦診斷必須有臨床描述中的對應證據
+4. **層級化思考**：區分主要問題、併發症、共病、基礎疾病
+"""
+    
+    return prompt
+	
+	
+	
+	
+	from openai import AzureOpenAI
+import json
+
+# 初始化Azure OpenAI客戶端
+api_key = 'your-api-key'
+endpoint = 'your-endpoint'
 deployment = 'gpt-4o'
-api_version='2024-12-01-preview'
+api_version = '2024-12-01-preview'
 
 client = AzureOpenAI(
-    api_key = api_key,
-    azure_endpoint = endpoint,
-    api_version = api_version
+    api_key=api_key,
+    azure_endpoint=endpoint,
+    api_version=api_version
 )
 
-# response = client.chat.completions.create(model=deployment, 
-#                                           messages=[{"role": "system", "content": "你是一個厲害的數學家。"},
-#                                                     {"role": "user", "content": "可以請你幫我介紹泰勒展開式嗎?"}]
-                                         # )
-history = [{'role': 'system', 'content': '你是一個厲害的數學家'}]
+def analyze_cmi_with_rag(patient_symptoms, retrieved_diagnoses):
+    """
+    使用RAG結果進行CMI優化分析
+    
+    Args:
+        patient_symptoms: 病人症狀描述字串
+        retrieved_diagnoses: 從向量庫檢索到的診斷列表
+    """
+    
+    # 1. 建立Prompt
+    prompt = create_cmi_optimization_prompt(patient_symptoms, retrieved_diagnoses)
+    
+    # 2. 設定對話歷史（系統角色設定）
+    messages = [
+        {
+            "role": "system",
+            "content": "你是一位經驗豐富的醫療編碼專家，專精於DRG編碼與CMI優化。"
+                       "你的回答必須專業、精確，且基於臨床證據。"
+                       "特別注重高RW值診斷的識別與編碼完整性。"
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
+    
+    # 3. 呼叫GPT-4o
+    response = client.chat.completions.create(
+        model=deployment,
+        messages=messages,
+        temperature=0.2,  # 降低隨機性，增加一致性
+        max_tokens=2000   # 確保完整輸出
+    )
+    
+    return response.choices[0].message.content
 
-history.append({"role": "user", "content": '可以請你幫我介紹泰勒展開式嗎?'})
-
-response1 = client.chat.completions.create(model=deployment, messages=history)
-
-print(response1.choices[0].message.content)
-
-history = [{'role': 'user', 'content': '你的意思是，在x=0時叫做馬克勞林展開式? 那可解析函數(analytic function)又是甚麼?'}]
-response2 = client.chat.completions.create(model=deployment, messages=history)
-print(response2.choices[0].message.content)
+# 第三步：實際使用範例
+if __name__ == "__main__":
+    # 範例1：使用你提供的完整病例
+    patient_case = """
+    Chief Complaint: left leg swelling for 1 month
+    
+    Present Illness摘要: 
+    81歲女性，有跌倒病史，左腿腫脹一個月，伴隨左腳水泡和黃色分泌物。
+    否認胸痛、呼吸困難。D-dimer升高至27.02，CT顯示左下肢深層靜脈血栓及肺栓塞。
+    有帕金森氏症病史。
+    """
+    
+    # 假設從RAG檢索到的診斷（實際會從向量庫取得）
+    retrieved_dx = [
+        {
+            "icd10": "I2693",
+            "description": "肺栓塞",
+            "rw": 2.85,
+            "similarity": 0.95
+        },
+        {
+            "icd10": "I82402", 
+            "description": "下肢深層靜脈血栓",
+            "rw": 1.92,
+            "similarity": 0.93
+        },
+        {
+            "icd10": "I80229",
+            "description": "其他下肢靜脈血栓",
+            "rw": 1.75,
+            "similarity": 0.88
+        },
+        {
+            "icd10": "G20",
+            "description": "帕金森氏病",
+            "rw": 1.15,
+            "similarity": 0.70
+        },
+        {
+            "icd10": "E785",
+            "description": "高血脂症",
+            "rw": 0.87,
+            "similarity": 0.65
+        },
+        {
+            "icd10": "I10",
+            "description": "原發性高血壓",
+            "rw": 0.65,
+            "similarity": 0.50
+        },
+        {
+            "icd10": "E119",
+            "description": "第二型糖尿病",
+            "rw": 1.08,
+            "similarity": 0.45
+        },
+        {
+            "icd10": "I4891",
+            "description": "心房顫動",
+            "rw": 1.42,
+            "similarity": 0.40
+        }
+    ]
+    
+    # 執行CMI優化分析
+    print("🔬 開始CMI優化分析...\n")
+    result = analyze_cmi_with_rag(patient_case, retrieved_dx)
+    print(result)
+    
+    # 儲存結果
+    with open("cmi_analysis_result.txt", "w", encoding="utf-8") as f:
+        f.write(result)
+    
+    print("\n✅ 分析完成！結果已保存至 cmi_analysis_result.txt")
+	
+	
+	
+	
