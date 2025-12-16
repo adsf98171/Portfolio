@@ -1,197 +1,310 @@
 from openai import AzureOpenAI
+import re
 
-# 你的Azure OpenAI設定
-api_key = ''
-endpoint = ''
-deployment = 'gpt-4o'
-api_version = '2024-12-01-preview'
-
-# 初始化客戶端
+# 你的設定
 client = AzureOpenAI(
-    api_key=api_key,
-    azure_endpoint=endpoint,
-    api_version=api_version
+    api_key='your-api-key',
+    azure_endpoint='your-endpoint',
+    api_version='2024-12-01-preview'
 )
 
-# 你提供的那筆完整病例（我已經幫你整理過了）
-single_case = """
-# 病例基本資訊
-病人：81歲女性
-主訴：左腿腫脹一個月 (left leg swelling for 1 month)
+# 你提供的完整病例（精簡重點版）
+case_study = """
+【病人】81歲女性
+【主訴】左腿腫脹一個月 (left leg swelling for 1 month)
 
-# 現病史摘要
-- 2025年8月有跌倒史，膝蓋及下肢持續疼痛
-- 曾在中興醫院左膝接受類固醇注射
-- 伴隨症狀：左腳水泡伴淡黃色分泌物1週、左膝壓痛、雙下肢及腹部瘀點
-- 因下肢疼痛無法穩步行走1週
-- 否認胸痛、胸悶、呼吸急促、呼吸困難等症狀
+【現病史】
+- 2025年8月跌倒史，下肢持續疼痛
+- 左膝接受類固醇注射
+- 左腳水泡伴淡黃色分泌物1週
+- 雙下肢及腹部瘀點
+- 否認胸痛、呼吸困難
 
-# 關鍵檢查結果
-1. 實驗室檢查：
+【檢查發現】
+1. 實驗室：
    - 血小板減少 (93,000)
-   - D-dimer極度升高 (27.02 ug/mL)
-   - CEA升高 (5.4 ng/mL)
+   - D-dimer極度升高 (27.02)
+   - CEA升高 (5.4)
+   
+2. 影像學：
+   - 血管超音波：左側多條靜脈完全栓塞
+   - 右側部分栓塞  
+   - CT：左下肺葉肺動脈血栓栓塞
+   - 左甲狀腺結節1.1cm
+   - 左腎上腺結節1.2cm
 
-2. 影像學檢查：
-   - 血管超音波：左側大隱靜脈、總股靜脈、表淺股靜脈、深股靜脈、膕靜脈完全栓塞
-   - 右側總股靜脈和深股靜脈部分栓塞
-   - 胸部CT：左下肺葉肺動脈血栓栓塞
-   - 腹部CT：左外髂靜脈及雙側股靜脈血栓
+【當前診斷碼】
+- 主要診斷：I2693
+- 次診斷：I82402、E785、G20
 
-3. 其他檢查：
-   - 心臟超音波：輕度三尖瓣關閉不全，右心室收縮壓約22 mmHg
-   - 婦科超音波：輕度子宮積水 (0.3cc)
-
-# 既有診斷與治療
-- 主要診斷 (Principal Diagnosis): I2693
-- 次診斷 (Secondary Diagnosis): I82402、E785、G20
-- 臨床印象 (Impression): Deep vein thrombosis with pulmonary embolism
-- 基礎疾病：帕金森氏症 (2021年起)、高血脂症
-- 治療：Enoxaparin → Edoxaban
-
-# 病史與手術史
-- 2020年雙側全膝關節置換術（郵政醫院）
-- 20+年腰椎間盤突出伴骨刺手術（榮總）
+【臨床印象】Deep vein thrombosis with pulmonary embolism
+【基礎疾病】帕金森氏症、高血脂症
 """
 
-# 建立專業CMI優化分析Prompt
-cmi_prompt = f"""
+def create_diagnostic_prompt(case_text, evaluation_focus="completeness"):
+    """
+    建立診斷完整性分析Prompt（無RW值版本）
+    
+    evaluation_focus選項：
+    - "completeness": 診斷完整性
+    - "precision": ICD-10精確度  
+    - "clinical": 臨床合理性
+    - "all": 全面分析
+    """
+    
+    focus_instructions = {
+        "completeness": """
+        請專注分析「診斷完整性」：
+        1. 現有診斷是否足夠反映疾病全貌？
+        2. 哪些重要診斷可能被遺漏？
+        3. 根據檢查結果，應考慮哪些額外診斷？
+        """,
+        
+        "precision": """
+        請專注分析「ICD-10精確度」：
+        1. 現有代碼是否使用最精確的子代碼？
+        2. 是否有更準確的代碼可用？
+        3. 代碼選擇是否符合臨床表現？
+        """,
+        
+        "clinical": """
+        請專注分析「臨床合理性」：
+        1. 診斷組合是否符合臨床邏輯？
+        2. 是否有矛盾或不一致的診斷？
+        3. 是否需要進一步檢查確認？
+        """,
+        
+        "all": """
+        請進行全面分析，包含：
+        1. 診斷完整性審查
+        2. ICD-10代碼精確度評估
+        3. 臨床合理性檢查
+        4. 具體改進建議
+        """
+    }
+    
+    prompt = f"""
 # 角色設定
-你是一位資深醫療編碼與CMI優化專家，專門審查病歷完整性以最大化健保給付。
-你現在要分析以下病例，目標是：
+你是一位資深臨床醫師兼醫療編碼顧問，擁有15年臨床經驗。
+你的專長是：從複雜臨床資料中識別完整診斷組合，確保病歷反映真實疾病負擔。
 
-## 主要任務
-1. **診斷碼完整性審查**：檢查現有診斷碼是否完整反映疾病嚴重度
-2. **高RW值診斷識別**：找出可能被遺漏的高給付診斷
-3. **ICD-10精確性**：確認診斷碼是否使用最精確的子代碼
-4. **CMI優化建議**：提出具體的編碼改進建議
+# 分析任務
+{focus_instructions.get(evaluation_focus, focus_instructions['all'])}
 
-## 病例資料
-{'-' * 50}
-{single_case}
-{'-' * 50}
+# 病例資料
+{case_text}
 
-## 分析要求
+# 輸出格式要求
 
-### 第一部分：現有診斷碼評估
-請評估以下現有診斷碼的適當性：
-1. **I2693** (Principal Diagnosis)
-2. **I82402** (Secondary Diagnosis)  
-3. **E785** (Secondary Diagnosis)
-4. **G20** (Secondary Diagnosis)
+## 📋 現有診斷評估
+（對每個現有診斷碼進行評價）
 
-針對每個代碼回答：
-- 是否使用最精確的ICD-10子代碼？
-- 臨床證據是否充分支持？
-- RW值大概範圍？（如果知道）
+## 🔍 可能遺漏的診斷
+（基於檢查發現，列出應考慮但未列出的診斷）
 
-### 第二部分：可能遺漏的高價值診斷
-根據病例中的檢查結果和臨床發現，哪些**高RW值診斷**可能被遺漏？
-請特別注意：
-- **D-dimer極度升高 (27.02)**
-- **CEA升高 (5.4)**
-- **血小板減少 (93,000)**
-- **多處靜脈血栓**
-- **左甲狀腺低密度結節 (1.1cm)**
-- **左腎上腺小結節 (1.2cm)**
-- **子宮積水 (0.3cc)**
+## 🎯 ICD-10代碼精確化建議
+（如有更精確的代碼）
 
-### 第三部分：ICD-10代碼精確化建議
-請提供更精確的ICD-10代碼建議（包含小數點）：
-例如：
-- I26.99 vs I26.93 的差異
-- 是否有更精確的靜脈血栓代碼？
-- 共病症是否需要更精確編碼？
+## ⚠️ 臨床疑慮與建議
+（需要澄清或進一步檢查的事項）
 
-### 第四部分：RW值影響評估
-如果加入你建議的診斷碼，預估CMI值（總RW值）可能提升多少？
-請分：
-1. 主要診斷優化影響
-2. 次診斷新增影響
-3. 併發症編碼影響
+## 📊 診斷完整性評分
+請給分（1-10分，10分最完整）：
+- 完整性分數：__/10
+- 精確度分數：__/10  
+- 臨床合理性分數：__/10
 
-### 第五部分：具體行動建議
-給臨床醫師的具體建議：
-1. 病歷中應補充哪些關鍵描述？
-2. 應考慮哪些進一步檢查以支持額外診斷？
-3. 如何與編碼人員溝通這些發現？
+# 重要原則
+1. **循證醫學**：每個建議必須有病例中的證據支持
+2. **臨床實用**：建議應實際可行，非純理論
+3. **分級思考**：區分主要問題、併發症、共病
+4. **務實優先**：優先考慮對治療有影響的診斷
 
-## 輸出格式
-請按以下格式組織你的回答：
-
-# 🏥 病例CMI優化分析報告
-
-## 📊 現有診斷碼評估
-（表格形式）
-
-| ICD-10碼 | 診斷名稱 | 精確度 | 證據充分性 | 建議改進 |
-|----------|----------|--------|------------|----------|
-
-## 🔍 遺漏診斷識別
-### 高RW值機會（RW>1.5）
-1. **建議診斷**：(ICD-10碼) 診斷名稱
-   - **臨床證據**：
-   - **RW值預估**：
-   - **CMI影響**：
-
-### 應考慮的次診斷
-1. **建議診斷**：(ICD-10碼) 診斷名稱
-   - **臨床依據**：
-   - **編碼必要性**：
-
-## 🎯 代碼精確化建議
-1. **原代碼**：I2693 → **建議代碼**：I26.99
-   - **理由**：
-
-## 💰 RW值影響總結
-- 現有診斷總RW值預估：約 X.XX
-- 優化後總RW值預估：約 Y.YY
-- 預期提升：Z%
-
-## 📝 給臨床醫師的具體建議
-1. **病歷補充**：
-2. **進一步檢查**：
-3. **編碼溝通**：
-
-## ⚠️ 注意事項與風險提醒
-（過度編碼風險、臨床合理性等）
+請開始分析：
 """
+    return prompt
 
-# 發送請求到GPT-4o
-print("🤖 AI醫療編碼專家分析中，請稍候...\n")
-print("=" * 70)
+def evaluate_gpt_response(response_text, case_text):
+    """
+    評估GPT回答質量的簡單函數
+    返回評估報告
+    """
+    
+    evaluation_criteria = {
+        "completeness": {
+            "description": "是否識別出可能遺漏的診斷",
+            "keywords": ["遺漏", "未列出", "應考慮", "可能", "建議增加"]
+        },
+        "specificity": {
+            "description": "是否提供具體的ICD-10建議",
+            "keywords": ["I26.", "I82.", "E78.", "G20", "ICD-10", "代碼"]
+        },
+        "clinical_reasoning": {
+            "description": "是否提供臨床推理過程",
+            "keywords": ["因為", "由於", "基於", "證據", "檢查顯示"]
+        },
+        "actionability": {
+            "description": "建議是否具體可行",
+            "keywords": ["進一步檢查", "建議", "應", "需要", "確認"]
+        }
+    }
+    
+    # 簡單關鍵詞匹配評估
+    scores = {}
+    feedback = []
+    
+    for criterion, info in evaluation_criteria.items():
+        keyword_count = 0
+        for keyword in info["keywords"]:
+            if keyword.lower() in response_text.lower():
+                keyword_count += 1
+        
+        # 計算分數（0-3分）
+        score = min(keyword_count, 3)
+        scores[criterion] = score
+        
+        feedback.append(f"{criterion}: {score}/3 - {info['description']}")
+    
+    # 計算總分
+    total_score = sum(scores.values()) / len(scores) * 10  # 轉為10分制
+    
+    # 檢查是否有評分
+    has_scoring = "分數" in response_text or "評分" in response_text or "/10" in response_text
+    
+    # 檢查結構完整性
+    sections = ["現有診斷", "遺漏", "ICD-10", "臨床", "建議"]
+    section_coverage = sum(1 for section in sections if section in response_text)
+    
+    return {
+        "total_score": round(total_score, 1),
+        "detailed_scores": scores,
+        "feedback": feedback,
+        "has_scoring": has_scoring,
+        "section_coverage": f"{section_coverage}/{len(sections)}",
+        "response_length": len(response_text)
+    }
 
-try:
-    response = client.chat.completions.create(
-        model=deployment,
-        messages=[
-            {
-                "role": "system", 
-                "content": "你是一位有20年經驗的醫療編碼專家，專精於DRG、ICD-10編碼與CMI優化。請用專業但易懂的中文回答。"
-            },
-            {
-                "role": "user",
-                "content": cmi_prompt
-            }
-        ],
-        temperature=0.3,  # 降低隨機性，確保專業性
-        max_tokens=4000,  # 確保完整分析
-        top_p=0.9
-    )
+def run_diagnostic_analysis():
+    """執行完整的診斷分析與評估"""
     
-    # 輸出結果
-    result = response.choices[0].message.content
-    print(result)
-    
-    # 儲存結果到檔案
-    with open("single_case_cmi_analysis.txt", "w", encoding="utf-8") as f:
-        f.write("# 病例CMI優化分析報告\n")
-        f.write("=" * 60 + "\n\n")
-        f.write(result)
-    
-    print("\n" + "=" * 70)
-    print("✅ 分析完成！結果已儲存至 single_case_cmi_analysis.txt")
+    print("🔬 開始診斷完整性分析...")
     print("=" * 70)
     
-except Exception as e:
-    print(f"❌ 發生錯誤：{e}")
+    # 1. 發送請求
+    prompt = create_diagnostic_prompt(case_study, "all")
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "你是嚴謹的臨床診斷專家，回答要基於證據。"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=2500
+        )
+        
+        gpt_response = response.choices[0].message.content
+        
+        # 2. 顯示GPT回答
+        print("🤖 GPT-4o 分析結果：")
+        print("=" * 70)
+        print(gpt_response)
+        print("=" * 70)
+        
+        # 3. 評估回答質量
+        print("\n📊 回答質量評估：")
+        evaluation = evaluate_gpt_response(gpt_response, case_study)
+        
+        print(f"總分: {evaluation['total_score']}/10")
+        print(f"段落完整性: {evaluation['section_coverage']}")
+        print(f"回答長度: {evaluation['response_length']} 字元")
+        
+        print("\n詳細評分：")
+        for item in evaluation["feedback"]:
+            print(f"  - {item}")
+        
+        # 4. 專家對照評估（人工標準）
+        print("\n👨‍⚕️ 專家對照評估（人工標準）：")
+        print("期望GPT應識別的關鍵點：")
+        
+        expected_points = [
+            "1. I2693應考慮更精確代碼（如I26.99）",
+            "2. 血小板減少可能指向其他診斷（如DIC、ITP）",
+            "3. CEA升高需考慮惡性腫瘤可能",
+            "4. 多發血栓需考慮易栓症（thrombophilia）",
+            "5. 甲狀腺/腎上腺結節需進一步評估"
+        ]
+        
+        for point in expected_points:
+            if any(keyword in gpt_response for keyword in point.split()[:3]):
+                print(f"  ✅ {point}")
+            else:
+                print(f"  ❌ {point} (可能遺漏)")
+        
+        # 5. 儲存結果
+        timestamp = "test_result"
+        filename = f"diagnostic_analysis_{timestamp}.txt"
+        
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("="*60 + "\n")
+            f.write("診斷完整性分析報告\n")
+            f.write("="*60 + "\n\n")
+            f.write("【病例資料】\n")
+            f.write(case_study + "\n\n")
+            f.write("【GPT分析結果】\n")
+            f.write(gpt_response + "\n\n")
+            f.write("【質量評估】\n")
+            f.write(f"總分: {evaluation['total_score']}/10\n")
+            f.write(f"段落完整性: {evaluation['section_coverage']}\n")
+            for item in evaluation["feedback"]:
+                f.write(f"{item}\n")
+        
+        print(f"\n💾 結果已儲存至: {filename}")
+        
+        return {
+            "response": gpt_response,
+            "evaluation": evaluation,
+            "filename": filename
+        }
+        
+    except Exception as e:
+        print(f"❌ 發生錯誤：{e}")
+        return None
+
+# 執行分析
+if __name__ == "__main__":
+    result = run_diagnostic_analysis()
+    
+    # 可選：多角度測試
+    print("\n" + "="*70)
+    print("🔄 進行多角度測試...")
+    
+    test_aspects = ["completeness", "precision", "clinical"]
+    
+    for aspect in test_aspects:
+        print(f"\n測試重點：{aspect}")
+        prompt = create_diagnostic_prompt(case_study, aspect)
+        
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=1500
+            )
+            
+            # 簡單檢查回應長度
+            resp_text = response.choices[0].message.content
+            print(f"  回應長度: {len(resp_text)} 字元")
+            
+            # 檢查是否針對重點
+            if aspect == "completeness" and ("遺漏" in resp_text or "未列出" in resp_text):
+                print("  ✅ 有討論遺漏診斷")
+            elif aspect == "precision" and ("ICD-10" in resp_text or "代碼" in resp_text):
+                print("  ✅ 有討論代碼精確度")
+            elif aspect == "clinical" and ("進一步" in resp_text or "檢查" in resp_text):
+                print("  ✅ 有臨床建議")
+                
+        except Exception as e:
+            print(f"  ❌ 錯誤: {e}")
