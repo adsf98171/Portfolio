@@ -1,0 +1,30 @@
+下載 CUDA
+
+1. RTX5060 -> CUDA version 12.8.0
+
+https://developer.nvidia.com/cuda-toolkit-archive
+
+2. cuDNN Download 
+
+https://developer.nvidia.com/cudnn-downloads
+
+裝好後用nvcc -V檢查cuda
+
+3. 裝好annaconda和pycharm後，創建cuda環境
+
+conda create -n yolov12 python=3.9
+
+4. 進入以下網址 -> Project -> PyTorch -> Get Start with Pytorch
+  
+https://pytorch.org/
+
+5. 進入以下網址 -> torch -> 找網址2下載 -> 
+https://download.pytorch.org/whl/cu128
+https://download.pytorch.org/whl/torch/torch-2.8.0+cu128-cp39-cp39-win_amd64.whl
+
+6. 執行pip install torch-2.8.0+cu128-cp39-cp39-win_amd64.whl
+
+7. 最後執行3.的選完後的'Run this Command' pip在cmd下載
+
+參考: https://blog.csdn.net/weixin_42872122/article/details/151682480
+      https://www.cnblogs.com/yxysuanfa/p/19115224
